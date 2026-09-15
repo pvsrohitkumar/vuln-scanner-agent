@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vulnerability Scanner Agent</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    /* ── Reset & Base ─────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+      color: #e0e0e0;
+      min-height: 100vh;
+      display: flex; flex-direction: column; align-items: center;
+      padding: 2rem 1rem;
+    }
+
+    /* ── Header ───────────────────────────────────────────── */
+    .header { text-align: center; margin-bottom: 2.5rem; }
+    .header h1 {
+      font-size: 2.4rem; font-weight: 800;
+      background: linear-gradient(90deg, #00d2ff, #7b2ff7);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .header p { color: #aaa; margin-top: .5rem; font-size: 1.05rem; }
+
+    /* ── Card Container ───────────────────────────────────── */
+    .card {
+      background: rgba(255,255,255,0.06);
+      backdrop-filter: blur(18px);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 20px;
+      padding: 2.5rem;
+      width: 100%; max-width: 680px;
+      box-shadow: 0 8px 32px rgba(0,0,0,.35);
+    }
+
+    /* ── Form ─────────────────────────────────────────────── */
+    .form-group { display: flex; gap: .75rem; margin-bottom: 1.2rem; }
+    .form-group input {
+      flex: 1;
+      padding: .85rem 1.1rem;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.05);
+      color: #fff;
+      font-size: 1rem;
+      outline: none;
+      transition: border-color .2s;
+    }
+    .form-group input::placeholder { color: #777; }
+    .form-group input:focus { border-color: #7b2ff7; }
+
+    .btn {
+      padding: .85rem 1.8rem;
+      border-radius: 12px; border: none;
+      background: linear-gradient(135deg, #7b2ff7, #00d2ff);
+      color: #fff; font-weight: 600; font-size: 1rem;
+      cursor: pointer;
+      transition: opacity .2s, transform .1s;
+      white-space: nowrap;
+    }
+    .btn:hover { opacity: .9; transform: translateY(-1px); }
+    .btn:active { transform: translateY(0); }
+    .btn:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+
+    /* ── Status / Progress ────────────────────────────────── */
+    .status {
+      padding: 1rem 0; font-size: .95rem; color: #aaa;
+      display: none;
+    }
+    .status.visible { display: block; }
+    .status-header {
+      text-align: center; margin-bottom: .8rem;
+    }
+    .spinner {
+      display: inline-block; width: 20px; height: 20px;
+      border: 3px solid rgba(255,255,255,.15);
+      border-top-color: #7b2ff7;
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+      vertical-align: middle; margin-right: .5rem;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Progress Log ─────────────────────────────────────── */
+    .progress-log {
+      background: rgba(0,0,0,.25);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 12px;
+      padding: .8rem 1rem;
+      max-height: 200px;
+      overflow-y: auto;
+      font-family: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+      font-size: .82rem;
+      line-height: 1.7;
+    }
+    .progress-log::-webkit-scrollbar { width: 5px; }
+    .progress-log::-webkit-scrollbar-thumb { background: rgba(255,255,255,.12); border-radius: 3px; }
+
+    .progress-step {
+      display: flex; align-items: flex-start; gap: .5rem;
+      opacity: 0;
+      animation: fadeInStep .3s ease forwards;
+    }
+    @keyframes fadeInStep { to { opacity: 1; } }
+
+    .step-icon {
+      flex-shrink: 0; width: 18px; text-align: center; margin-top: 1px;
+    }
+    .step-icon.done { color: #2ecc71; }
+    .step-icon.active { color: #7b2ff7; }
+    .step-text { color: #ccc; }
+    .step-text.active { color: #fff; font-weight: 500; }
+    .step-time {
+      margin-left: auto; flex-shrink: 0;
+      color: #666; font-size: .72rem;
+    }
+
+    .error-msg {
+      background: rgba(231,76,60,.15); border: 1px solid rgba(231,76,60,.4);
+      border-radius: 12px; padding: 1rem; margin-top: 1rem;
+      color: #e74c3c; font-size: .92rem; display: none;
+    }
+    .error-msg.visible { display: block; }
+
+    /* ── Results ───────────────────────────────────────────── */
+    .results { display: none; margin-top: 1.5rem; }
+    .results.visible { display: block; }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+      gap: .75rem;
+      margin-bottom: 1.5rem;
+    }
+    .summary-card {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.07);
+      border-radius: 14px;
+      padding: 1rem;
+      text-align: center;
+    }
+    .summary-card .count { font-size: 1.8rem; font-weight: 700; }
+    .summary-card .label { font-size: .78rem; text-transform: uppercase; letter-spacing: .05em; color: #aaa; margin-top: .2rem; }
+
+    .sev-critical .count { color: #e74c3c; }
+    .sev-high .count     { color: #e67e22; }
+    .sev-moderate .count  { color: #f1c40f; }
+    .sev-low .count      { color: #2ecc71; }
+    .sev-total .count    { color: #00d2ff; }
+
+    /* ── Table ─────────────────────────────────────────────── */
+    .table-wrap {
+      max-height: 420px; overflow-y: auto;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.07);
+      margin-bottom: 1.25rem;
+    }
+    .table-wrap::-webkit-scrollbar { width: 6px; }
+    .table-wrap::-webkit-scrollbar-thumb { background: rgba(255,255,255,.15); border-radius: 3px; }
+
+    table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+    thead { position: sticky; top: 0; z-index: 1; }
+    thead th {
+      background: rgba(26,35,126,.9);
+      color: #fff; padding: .7rem .8rem; text-align: left;
+      font-weight: 600;
+    }
+    tbody td { padding: .6rem .8rem; border-bottom: 1px solid rgba(255,255,255,0.04); }
+    tbody tr:hover { background: rgba(255,255,255,0.03); }
+
+    .badge {
+      display: inline-block; padding: .2rem .6rem;
+      border-radius: 6px; font-size: .75rem; font-weight: 600;
+      text-transform: uppercase; color: #fff;
+    }
+    .badge-critical { background: #7d1128; }
+    .badge-high     { background: #c0392b; }
+    .badge-moderate { background: #e67e22; }
+    .badge-low      { background: #2980b9; }
+    .badge-info     { background: #7f8c8d; }
+    .badge-unknown  { background: #95a5a6; }
+
+    /* ── Download Button ──────────────────────────────────── */
+    .download-row { text-align: center; }
+    .btn-download {
+      display: inline-flex; align-items: center; gap: .5rem;
+      padding: .8rem 2rem;
+      border-radius: 12px; border: none;
+      background: linear-gradient(135deg, #00b09b, #96c93d);
+      color: #fff; font-weight: 600; font-size: 1rem;
+      cursor: pointer; text-decoration: none;
+      transition: opacity .2s, transform .1s;
+    }
+    .btn-download:hover { opacity: .9; transform: translateY(-1px); }
+    .btn-download svg { width: 18px; height: 18px; }
+
+    /* ── Ecosystem Badge ───────────────────────────────────── */
+    .ecosystem-info {
+      text-align: center; margin-bottom: 1.2rem;
+      font-size: .95rem; color: #ccc;
+    }
+    .eco-badge {
+      display: inline-block; padding: .3rem .9rem;
+      border-radius: 8px; font-size: .8rem; font-weight: 600;
+      text-transform: uppercase; letter-spacing: .04em;
+      color: #fff; margin-left: .4rem;
+    }
+    .eco-npm    { background: linear-gradient(135deg, #cb3837, #e05d5d); }
+    .eco-python { background: linear-gradient(135deg, #306998, #ffd43b); color: #306998; }
+    .eco-maven  { background: linear-gradient(135deg, #c71a36, #f06529); }
+    .eco-dotnet { background: linear-gradient(135deg, #512bd4, #9b4dca); }
+
+    /* ── Footer ────────────────────────────────────────────── */
+    .footer { margin-top: 2rem; color: #555; font-size: .82rem; }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <h1>🛡️ Vulnerability Scanner Agent</h1>
+    <p>Paste a Git repository URL to scan for vulnerabilities</p>
+    <p style="margin-top:.4rem;font-size:.85rem;color:#777;">
+      Supports <strong style="color:#aaa;">Node.js</strong> (Angular, React, TypeScript) ·
+      <strong style="color:#aaa;">Python</strong> ·
+      <strong style="color:#aaa;">Java</strong> (Maven / Gradle) ·
+      <strong style="color:#aaa;">.NET</strong>
+    </p>
+  </div>
+
+  <div class="card">
+    <form id="scanForm" onsubmit="return handleScan(event)">
+      <div class="form-group">
+        <input
+          type="text" id="repoUrl"
+          placeholder="https://github.com/owner/repo.git"
+          autocomplete="url" required />
+        <button class="btn" type="submit" id="scanBtn">Scan</button>
+      </div>
+    </form>
+
+    <div class="status" id="status">
+      <div class="status-header">
+        <span class="spinner"></span>
+        <span id="statusText">Starting scan…</span>
+      </div>
+      <div class="progress-log" id="progressLog"></div>
+    </div>
+
+    <div class="error-msg" id="errorMsg"></div>
+
+    <div class="results" id="results">
+      <div class="ecosystem-info" id="ecosystemInfo"></div>
+      <div class="summary-grid" id="summaryGrid"></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Severity</th>
+              <th>Package / Dependency</th>
+              <th>Fix / Advisory</th>
+            </tr>
+          </thead>
+          <tbody id="tableBody"></tbody>
+        </table>
+      </div>
+      <div class="download-row">
+        <a class="btn-download" id="downloadBtn" href="#" target="_blank">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v12m0 0l-4-4m4 4l4-4M4 18h16" />
+          </svg>
+          Download PDF Report
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">Powered by npm audit · pip-audit · OWASP · dotnet CLI &middot; PDF generated with ReportLab</div>
+
+<script>
+  let scanStartTime = null;
+
+  function elapsedStr() {
+    if (!scanStartTime) return "";
+    const sec = ((Date.now() - scanStartTime) / 1000).toFixed(1);
+    return `${sec}s`;
+  }
+
+  function addProgressStep(message, isDone = false) {
+    const log = document.getElementById("progressLog");
+    const statusText = document.getElementById("statusText");
+
+    // Mark previous active step as done
+    const prev = log.querySelector(".step-icon.active");
+    if (prev) {
+      prev.classList.remove("active");
+      prev.classList.add("done");
+      prev.textContent = "✓";
+      const prevText = prev.parentElement.querySelector(".step-text");
+      if (prevText) prevText.classList.remove("active");
+    }
+
+    // Add new step
+    const step = document.createElement("div");
+    step.className = "progress-step";
+    const iconCls = isDone ? "step-icon done" : "step-icon active";
+    const iconChar = isDone ? "✓" : "›";
+    const textCls = isDone ? "step-text" : "step-text active";
+    step.innerHTML = `
+      <span class="${iconCls}">${iconChar}</span>
+      <span class="${textCls}">${message}</span>
+      <span class="step-time">${elapsedStr()}</span>`;
+    log.appendChild(step);
+
+    // Auto-scroll to bottom
+    log.scrollTop = log.scrollHeight;
+
+    // Update header text
+    statusText.textContent = message;
+  }
+
+  function markAllDone() {
+    const log = document.getElementById("progressLog");
+    const active = log.querySelector(".step-icon.active");
+    if (active) {
+      active.classList.remove("active");
+      active.classList.add("done");
+      active.textContent = "✓";
+      const txt = active.parentElement.querySelector(".step-text");
+      if (txt) txt.classList.remove("active");
+    }
+  }
+
+  async function handleScan(e) {
+    e.preventDefault();
+    const url = document.getElementById("repoUrl").value.trim();
+    if (!url) return;
+
+    // Reset UI
+    const btn = document.getElementById("scanBtn");
+    const status = document.getElementById("status");
+    const statusText = document.getElementById("statusText");
+    const errorMsg = document.getElementById("errorMsg");
+    const results = document.getElementById("results");
+    const progressLog = document.getElementById("progressLog");
+
+    btn.disabled = true;
+    btn.textContent = "Scanning…";
+    results.classList.remove("visible");
+    errorMsg.classList.remove("visible");
+    progressLog.innerHTML = "";
+    status.classList.add("visible");
+    scanStartTime = Date.now();
+    statusText.textContent = "Connecting…";
+
+    // Open SSE stream
+    const params = new URLSearchParams({ repo_url: url });
+    const evtSource = new EventSource(`/scan/stream?${params}`);
+
+    evtSource.addEventListener("progress", (e) => {
+      const data = JSON.parse(e.data);
+      addProgressStep(data.message);
+    });
+
+    evtSource.addEventListener("result", (e) => {
+      evtSource.close();
+      markAllDone();
+
+      const data = JSON.parse(e.data);
+
+      // Small delay so user sees the final ✓ before switching view
+      setTimeout(() => {
+        status.classList.remove("visible");
+        btn.disabled = false;
+        btn.textContent = "Scan";
+
+        if (!data.success) {
+          errorMsg.textContent = "⚠️ " + data.error;
+          errorMsg.classList.add("visible");
+          return;
+        }
+
+        renderResults(data);
+      }, 400);
+    });
+
+    evtSource.onerror = () => {
+      evtSource.close();
+      status.classList.remove("visible");
+      errorMsg.textContent = "⚠️ Connection lost. Please try again.";
+      errorMsg.classList.add("visible");
+      btn.disabled = false;
+      btn.textContent = "Scan";
+    };
+  }
+
+  function renderResults(data) {
+    // Ecosystem badge
+    const ecoInfo = document.getElementById("ecosystemInfo");
+    const eco = data.ecosystem || "npm";
+    const ecoLabel = data.ecosystem_label || "Node.js / npm";
+    ecoInfo.innerHTML = `Scanned as <span class="eco-badge eco-${eco}">${ecoLabel}</span>`;
+
+    // Summary cards
+    const grid = document.getElementById("summaryGrid");
+    grid.innerHTML = "";
+    const cards = [
+      { label: "Total", value: data.total, cls: "sev-total" },
+      { label: "Critical", value: data.critical, cls: "sev-critical" },
+      { label: "High", value: data.high, cls: "sev-high" },
+      { label: "Moderate", value: data.moderate, cls: "sev-moderate" },
+      { label: "Low", value: data.low, cls: "sev-low" },
+    ];
+    cards.forEach(c => {
+      const el = document.createElement("div");
+      el.className = `summary-card ${c.cls}`;
+      el.innerHTML = `<div class="count">${c.value}</div><div class="label">${c.label}</div>`;
+      grid.appendChild(el);
+    });
+
+    // Table
+    const tbody = document.getElementById("tableBody");
+    tbody.innerHTML = "";
+    (data.rows || []).forEach(row => {
+      const tr = document.createElement("tr");
+      const sevLower = row[0].toLowerCase();
+      tr.innerHTML = `
+        <td><span class="badge badge-${sevLower}">${row[0]}</span></td>
+        <td>${row[1]}</td>
+        <td>${row[2]}</td>`;
+      tbody.appendChild(tr);
+    });
+
+    // Download link
+    document.getElementById("downloadBtn").href = `/download/${data.pdf_filename}`;
+
+    document.getElementById("results").classList.add("visible");
+  }
+</script>
+</body>
+</html>
