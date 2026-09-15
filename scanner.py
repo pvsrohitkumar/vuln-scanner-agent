@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import uuid
@@ -67,6 +68,31 @@ REPORTS_DIR.mkdir(exist_ok=True)
 # Git helpers
 # ---------------------------------------------------------------------------
 
+def ensure_repo_writable(repo_path: Path) -> None:
+    """Clear read-only file attributes throughout the cloned repository."""
+    failures: list[str] = []
+    for root, dirs, files in os.walk(repo_path):
+        for name in dirs + files:
+            path = Path(root) / name
+            try:
+                current_mode = path.stat().st_mode
+                path.chmod(current_mode | stat.S_IWRITE)
+            except OSError:
+                failures.append(str(path))
+
+    try:
+        repo_path.chmod(repo_path.stat().st_mode | stat.S_IWRITE)
+    except OSError:
+        failures.append(str(repo_path))
+
+    if failures:
+        listed = ", ".join(failures[:5])
+        suffix = " …" if len(failures) > 5 else ""
+        raise PermissionError(
+            f"The agent cannot write to the cloned repository. "
+            f"Check permissions for: {listed}{suffix}"
+        )
+
 def clone_repo(repo_url: str) -> Path:
     """Clone a git repo into a temp directory and return its path."""
     tmp = Path(tempfile.mkdtemp(prefix="vulnscan_"))
@@ -76,7 +102,9 @@ def clone_repo(repo_url: str) -> Path:
         capture_output=True,
         text=True,
     )
-    return tmp / "repo"
+    repo_path = tmp / "repo"
+    ensure_repo_writable(repo_path)
+    return repo_path
 
 
 def cleanup_repo(repo_path: Path) -> None:
@@ -95,6 +123,7 @@ def clone_repo_to(repo_url: str, dest: str) -> Path:
     if dest_path.exists() and any(dest_path.iterdir()):
         # If directory exists and is non-empty, check if it's already the repo
         if (dest_path / ".git").exists():
+            ensure_repo_writable(dest_path)
             return dest_path
         # Clone into a subdirectory named after the repo
         repo_name = repo_url.rstrip("/").split("/")[-1].replace(".git", "")
@@ -107,6 +136,7 @@ def clone_repo_to(repo_url: str, dest: str) -> Path:
         capture_output=True,
         text=True,
     )
+    ensure_repo_writable(dest_path)
     return dest_path
 
 

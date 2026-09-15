@@ -42,6 +42,7 @@ from scanner import (
     clone_repo,
     cleanup_repo,
     detect_ecosystem,
+    ensure_repo_writable,
 )
 
 # ---------------------------------------------------------------------------
@@ -541,16 +542,30 @@ def _apply_gradle_fixes(repo_path: Path, fixes: list[FixAction], progress: Progr
             esc_v = re.escape(fix.current_version)
 
             if group:
-                # Match patterns like: "group:artifact:version"
-                # or implementation("group:artifact:version")
                 esc_g = re.escape(group)
                 esc_a = re.escape(artifact)
-                pattern = re.compile(
-                    rf"({esc_g}:{esc_a}:){esc_v}"
+
+                # Update an explicitly versioned coordinate even when the
+                # resolved version differs from the manifest or uses a variable.
+                explicit_pattern = re.compile(
+                    rf"(?P<quote>['\"]){esc_g}:{esc_a}:[^'\"\s)]+(?P=quote)"
                 )
-                new_content, count = pattern.subn(
-                    rf"\g<1>{fix.target_version}", content
+                new_content, count = explicit_pattern.subn(
+                    rf"\g<quote>{group}:{artifact}:{fix.target_version}\g<quote>",
+                    content,
                 )
+
+                # Spring Boot and similar BOMs commonly manage the version,
+                # leaving declarations as just "group:artifact". Add an
+                # explicit patched version so the fix is enforceable.
+                if count == 0:
+                    managed_pattern = re.compile(
+                        rf"(['\"]{esc_g}:{esc_a})(['\"])",
+                    )
+                    new_content, count = managed_pattern.subn(
+                        rf"\g<1>:{fix.target_version}\g<2>", content
+                    )
+
                 if count > 0:
                     content = new_content
                     if progress:
@@ -1215,6 +1230,11 @@ def apply_patch_local(
     repo_path = Path(local_path)
     if not repo_path.exists():
         return {"success": False, "error": f"Path does not exist: {local_path}"}
+
+    try:
+        ensure_repo_writable(repo_path)
+    except PermissionError as exc:
+        return {"success": False, "error": str(exc)}
 
     project_name = repo_path.name or "project"
     eco_label = ECOSYSTEM_LABELS.get(ecosystem, ecosystem)
