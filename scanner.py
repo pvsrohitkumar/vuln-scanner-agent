@@ -3,7 +3,7 @@
 Supported ecosystems:
   - Node.js / npm  (Angular, React, TypeScript, vanilla JS)
   - Python         (pip-audit via requirements.txt / setup.py / pyproject.toml)
-  - Java / Maven   (mvn dependency-check / org.owasp:dependency-check-maven)
+  - Java / Maven   (mvn dependency-check / org.owasp:dependency-check-maven + OSV.dev API)
   - .NET           (dotnet list package --vulnerable)
 """
 
@@ -18,6 +18,8 @@ import xml.etree.ElementTree as ET
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
@@ -338,7 +340,224 @@ def _parse_pip_audit_text(text: str) -> list[list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Java / Maven scanner  (OWASP dependency-check or mvn audit)
+# OSV.dev API helpers  (used as a fallback for Java / Maven / Gradle)
+# ---------------------------------------------------------------------------
+
+def _osv_query_package(ecosystem: str, name: str, version: str) -> list[dict]:
+    """Query OSV.dev for known vulnerabilities of a single package version."""
+    payload = json.dumps({
+        "version": version,
+        "package": {"name": name, "ecosystem": ecosystem},
+    }).encode()
+    req = Request(
+        "https://api.osv.dev/v1/query",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+            return data.get("vulns", [])
+    except (URLError, json.JSONDecodeError, OSError):
+        return []
+
+
+def _osv_severity(vuln: dict) -> str:
+    """Extract the highest severity from an OSV vulnerability entry."""
+    # 1) Check database_specific → cvss_score / severity
+    db_specific = vuln.get("database_specific", {})
+    sev = (db_specific.get("severity") or "").upper()
+    if sev in SEVERITY_ORDER:
+        return sev
+    if sev == "MEDIUM":
+        return "MODERATE"
+
+    # 2) Check severity list (CVSS)
+    for s in vuln.get("severity", []):
+        score_str = s.get("score", "")
+        # Try to extract CVSS base score from vector string
+        if "CVSS" in s.get("type", "").upper() and score_str:
+            try:
+                # CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H → extract base score
+                # Some OSV entries store the raw score as float
+                base = float(score_str) if score_str.replace(".", "", 1).isdigit() else None
+                if base is None and "/" in score_str:
+                    # Parse from vector – not always present, skip
+                    pass
+                if base is not None:
+                    if base >= 9.0:
+                        return "CRITICAL"
+                    elif base >= 7.0:
+                        return "HIGH"
+                    elif base >= 4.0:
+                        return "MODERATE"
+                    else:
+                        return "LOW"
+            except (ValueError, TypeError):
+                pass
+
+    # 3) Check affected[].ecosystem_specific or aliases for CVE
+    aliases = vuln.get("aliases", [])
+    if any(a.startswith("CVE-") for a in aliases):
+        return "HIGH"  # conservative default for CVEs without explicit severity
+
+    return "UNKNOWN"
+
+
+def _osv_fix_versions(vuln: dict, pkg_name: str) -> str:
+    """Extract fix/patched versions from an OSV entry for a specific package."""
+    fix_versions: list[str] = []
+    for affected in vuln.get("affected", []):
+        aff_pkg = affected.get("package", {})
+        aff_name = aff_pkg.get("name", "")
+        # Match by name (may include group:artifact or just artifact)
+        if pkg_name and aff_name and pkg_name not in aff_name and aff_name not in pkg_name:
+            continue
+        for rng in affected.get("ranges", []):
+            for event in rng.get("events", []):
+                fixed = event.get("fixed")
+                if fixed:
+                    fix_versions.append(fixed)
+    return ", ".join(sorted(set(fix_versions))) if fix_versions else "n/a"
+
+
+def _osv_advisory_url(vuln: dict) -> str:
+    """Extract the best advisory URL from an OSV entry."""
+    for ref in vuln.get("references", []):
+        rtype = (ref.get("type") or "").upper()
+        if rtype == "ADVISORY":
+            return ref.get("url", "n/a")
+    # Fallback: any WEB reference
+    for ref in vuln.get("references", []):
+        url = ref.get("url", "")
+        if url:
+            return url
+    # Fallback: construct OSV URL from ID
+    vuln_id = vuln.get("id", "")
+    if vuln_id:
+        return f"https://osv.dev/vulnerability/{vuln_id}"
+    return "n/a"
+
+
+def _scan_deps_via_osv(
+    dependencies: list[tuple[str, str, str]],
+    ecosystem: str,
+    progress=None,
+) -> list[list[str]]:
+    """
+    Given a list of (group, artifact, version) tuples, query OSV.dev for each
+    and return normalised rows: [[severity, package_label, fix_or_advisory], …].
+    """
+    rows: list[list[str]] = []
+    total = len(dependencies)
+    for idx, (group, artifact, version) in enumerate(dependencies, 1):
+        if progress and idx % 10 == 1:
+            progress(f"Checking OSV.dev ({idx}/{total})…")
+        # OSV uses "Maven" ecosystem with "group:artifact" as name
+        osv_name = f"{group}:{artifact}" if group else artifact
+        vulns = _osv_query_package(ecosystem, osv_name, version)
+        for vuln in vulns:
+            vuln_id = vuln.get("id", "")
+            severity = _osv_severity(vuln)
+            fix = _osv_fix_versions(vuln, osv_name)
+            advisory = _osv_advisory_url(vuln)
+            # Prefer fix version; if none, show advisory URL
+            fix_display = fix if fix != "n/a" else advisory
+            label = f"{osv_name}@{version} ({vuln_id})"
+            rows.append([severity, label, fix_display])
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Maven POM dependency extraction
+# ---------------------------------------------------------------------------
+
+def _parse_pom_dependencies(repo_path: Path) -> list[tuple[str, str, str]]:
+    """
+    Parse pom.xml and extract direct (and managed) dependencies as
+    (groupId, artifactId, version) tuples.
+    Also tries `mvn dependency:list` for resolved versions.
+    """
+    deps: list[tuple[str, str, str]] = []
+    pom = repo_path / "pom.xml"
+    if not pom.exists():
+        return deps
+
+    try:
+        tree = ET.parse(str(pom))
+        root = tree.getroot()
+        # Handle Maven namespace
+        ns = ""
+        m = re.match(r"\{(.+?)}", root.tag)
+        if m:
+            ns = m.group(1)
+        nsmap = {"m": ns} if ns else {}
+
+        def _find(parent, tag):
+            if ns:
+                return parent.findall(f"m:{tag}", nsmap)
+            return parent.findall(tag)
+
+        # Collect <properties> for version variable resolution
+        props: dict[str, str] = {}
+        for props_el in _find(root, "properties"):
+            for child in props_el:
+                tag_name = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+                if child.text:
+                    props[tag_name] = child.text.strip()
+
+        def _resolve_version(ver: str) -> str:
+            if not ver:
+                return ""
+            # Resolve ${property} references
+            m = re.match(r"\$\{(.+?)}", ver)
+            if m:
+                return props.get(m.group(1), ver)
+            return ver
+
+        # Parse <dependencies> and <dependencyManagement>
+        for deps_section in _find(root, "dependencies") + \
+                [dm_deps for dm in _find(root, "dependencyManagement")
+                 for dm_deps in _find(dm, "dependencies")]:
+            for dep_el in _find(deps_section, "dependency"):
+                g_els = _find(dep_el, "groupId")
+                a_els = _find(dep_el, "artifactId")
+                v_els = _find(dep_el, "version")
+                group = g_els[0].text.strip() if g_els and g_els[0].text else ""
+                artifact = a_els[0].text.strip() if a_els and a_els[0].text else ""
+                version = _resolve_version(
+                    v_els[0].text.strip() if v_els and v_els[0].text else ""
+                )
+                if artifact and version:
+                    deps.append((group, artifact, version))
+    except ET.ParseError:
+        pass
+
+    return deps
+
+
+def _parse_mvn_dependency_list(output: str) -> list[tuple[str, str, str]]:
+    """
+    Parse `mvn dependency:list` output.
+    Lines look like:  [INFO]    org.springframework.boot:spring-boot-starter-web:jar:3.1.0:compile
+    """
+    deps: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for line in output.splitlines():
+        # Match lines like: [INFO]    group:artifact:type:version:scope
+        m = re.search(r"(\S+):(\S+):\S+:(\S+):\S+", line)
+        if m:
+            group, artifact, version = m.group(1), m.group(2), m.group(3)
+            key = f"{group}:{artifact}:{version}"
+            if key not in seen:
+                seen.add(key)
+                deps.append((group, artifact, version))
+    return deps
+
+
+# ---------------------------------------------------------------------------
+# Java / Maven scanner  (OWASP dependency-check or mvn audit + OSV.dev fallback)
 # ---------------------------------------------------------------------------
 
 def scan_maven(repo_path: Path, progress=None) -> list[list[str]]:
@@ -361,7 +580,10 @@ def scan_maven(repo_path: Path, progress=None) -> list[list[str]]:
 
 
 def _scan_maven_owasp(repo_path: Path, java_env: dict, progress=None) -> list[list[str]]:
-    """Run OWASP dependency-check maven plugin."""
+    """
+    Run OWASP dependency-check Maven plugin and parse the JSON report.
+    Falls back to OSV.dev API lookup when the plugin is unavailable.
+    """
     rows: list[list[str]] = []
     report_json = repo_path / "target" / "dependency-check-report.json"
 
@@ -379,25 +601,81 @@ def _scan_maven_owasp(repo_path: Path, java_env: dict, progress=None) -> list[li
             data = json.loads(report_json.read_text(encoding="utf-8"))
             for dep in data.get("dependencies", []):
                 dep_name = dep.get("fileName", "unknown")
+                # Try to extract group:artifact:version from evidence
+                dep_identifiers = dep.get("packages", [])
                 for vuln in dep.get("vulnerabilities", []):
                     name = vuln.get("name", "")
                     severity = vuln.get("severity", "UNKNOWN").upper()
                     # Normalise severity names
                     if severity == "MEDIUM":
                         severity = "MODERATE"
-                    rows.append([severity, f"{dep_name} ({name})", "n/a"])
+
+                    # Extract fix/advisory info from OWASP report
+                    fix_display = "n/a"
+                    # Check for known fix in knownExploitedVulnerability
+                    kev = vuln.get("knownExploitedVulnerability", {})
+                    if kev and kev.get("shortDescription"):
+                        fix_display = kev.get("shortDescription", "n/a")
+
+                    # Check references for advisory URLs
+                    references = vuln.get("references", [])
+                    advisory_urls = []
+                    for ref in references:
+                        ref_source = (ref.get("source") or "").lower()
+                        ref_name = (ref.get("name") or "").lower()
+                        ref_url = ref.get("url", "")
+                        if ref_url and ("advisory" in ref_source or "advisory" in ref_name
+                                        or "github.com" in ref_url or "nvd.nist.gov" in ref_url):
+                            advisory_urls.append(ref_url)
+
+                    if fix_display == "n/a" and advisory_urls:
+                        fix_display = advisory_urls[0]
+
+                    # Check for CVSS score to refine severity
+                    cvss3 = vuln.get("cvssv3", {})
+                    if cvss3 and severity == "UNKNOWN":
+                        base_score = cvss3.get("baseScore", 0)
+                        if base_score >= 9.0:
+                            severity = "CRITICAL"
+                        elif base_score >= 7.0:
+                            severity = "HIGH"
+                        elif base_score >= 4.0:
+                            severity = "MODERATE"
+                        elif base_score > 0:
+                            severity = "LOW"
+
+                    rows.append([severity, f"{dep_name} ({name})", fix_display])
         except (json.JSONDecodeError, KeyError):
             pass
 
-    # Fallback: parse mvn dependency:tree for at least listing deps
+    # ── Fallback: use OSV.dev API with resolved dependencies ───────────
     if not rows:
-        result = _run_cmd(["mvn", "dependency:tree", "-q"], cwd=str(repo_path), env=java_env)
-        output = result.stdout or ""
-        if "BUILD FAILURE" not in output:
-            rows.append(["INFO", "No known vulnerabilities detected (dependency-check not available)", "n/a"])
+        if progress:
+            progress("OWASP plugin unavailable — resolving Maven dependencies…")
 
-    if not rows:
-        rows.append(["UNKNOWN", "Could not run Maven audit — ensure Maven is installed", "n/a"])
+        # Strategy A: try `mvn dependency:list` for fully resolved versions
+        dep_list_result = _run_cmd(
+            ["mvn", "dependency:list", "-DoutputAbsoluteArtifactFilename=false", "-q"],
+            cwd=str(repo_path), env=java_env,
+        )
+        dep_list_output = (dep_list_result.stdout or "") + (dep_list_result.stderr or "")
+        deps = _parse_mvn_dependency_list(dep_list_output)
+
+        # Strategy B: parse pom.xml directly if mvn command failed
+        if not deps:
+            if progress:
+                progress("Parsing pom.xml for dependencies…")
+            deps = _parse_pom_dependencies(repo_path)
+
+        if deps:
+            if progress:
+                progress(f"Found {len(deps)} dependencies — querying OSV.dev for vulnerabilities…")
+            rows = _scan_deps_via_osv(deps, "Maven", progress)
+
+        if not rows and deps:
+            rows.append(["INFO", f"No known vulnerabilities found in {len(deps)} Maven dependencies", "n/a"])
+        elif not rows:
+            rows.append(["UNKNOWN", "Could not resolve Maven dependencies — ensure Maven is installed", "n/a"])
 
     return rows
 
@@ -468,14 +746,39 @@ def _scan_gradle_dependencies(repo_path: Path, java_env: dict, progress=None) ->
                     severity = vuln.get("severity", "UNKNOWN").upper()
                     if severity == "MEDIUM":
                         severity = "MODERATE"
-                    rows.append([severity, f"{dep_name} ({name})", "n/a"])
+
+                    # Extract advisory/fix info
+                    fix_display = "n/a"
+                    references = vuln.get("references", [])
+                    for ref in references:
+                        ref_url = ref.get("url", "")
+                        if ref_url and ("advisory" in ref_url.lower()
+                                        or "github.com" in ref_url
+                                        or "nvd.nist.gov" in ref_url):
+                            fix_display = ref_url
+                            break
+
+                    # Refine severity via CVSS
+                    cvss3 = vuln.get("cvssv3", {})
+                    if cvss3 and severity == "UNKNOWN":
+                        base_score = cvss3.get("baseScore", 0)
+                        if base_score >= 9.0:
+                            severity = "CRITICAL"
+                        elif base_score >= 7.0:
+                            severity = "HIGH"
+                        elif base_score >= 4.0:
+                            severity = "MODERATE"
+                        elif base_score > 0:
+                            severity = "LOW"
+
+                    rows.append([severity, f"{dep_name} ({name})", fix_display])
         except (json.JSONDecodeError, KeyError):
             pass
 
     if rows:
         return rows
 
-    # ── Strategy 3: plain dependency tree ──────────────────────────────
+    # ── Strategy 3: dependency tree → OSV.dev lookup ───────────────────
     if progress:
         progress("Fetching Gradle dependency tree…")
     result = _run_cmd(
@@ -483,12 +786,25 @@ def _scan_gradle_dependencies(repo_path: Path, java_env: dict, progress=None) ->
         cwd=str(repo_path), env=java_env,
     )
     output = (result.stdout or "") + (result.stderr or "")
-    deps = _parse_gradle_dependency_tree(output)
-    if deps:
-        for dep in deps:
-            rows.append(["INFO", dep, "n/a"])
-        if not rows:
-            rows.append(["INFO", "No known vulnerabilities detected (add CycloneDX or OWASP plugin for full scan)", "n/a"])
+    dep_strings = _parse_gradle_dependency_tree(output)
+
+    if dep_strings:
+        # Convert "group:artifact:version" strings to tuples for OSV lookup
+        dep_tuples: list[tuple[str, str, str]] = []
+        for dep_str in dep_strings:
+            parts = dep_str.split(":")
+            if len(parts) >= 3:
+                dep_tuples.append((parts[0], parts[1], parts[2]))
+            elif len(parts) == 2:
+                dep_tuples.append(("", parts[0], parts[1]))
+
+        if dep_tuples:
+            if progress:
+                progress(f"Found {len(dep_tuples)} dependencies — querying OSV.dev for vulnerabilities…")
+            rows = _scan_deps_via_osv(dep_tuples, "Maven", progress)
+
+        if not rows and dep_tuples:
+            rows.append(["INFO", f"No known vulnerabilities found in {len(dep_tuples)} Gradle dependencies", "n/a"])
     else:
         error_detail = output[:200].strip() if output.strip() else "no output"
         rows.append(["UNKNOWN", f"Could not run Gradle audit — check Gradle/wrapper setup ({error_detail})", "n/a"])
