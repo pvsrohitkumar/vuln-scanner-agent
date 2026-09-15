@@ -7,6 +7,7 @@ import threading
 from flask import Flask, Response, jsonify, render_template, request, send_file
 from pathlib import Path
 from scanner import scan_repo, REPORTS_DIR
+from fixReport import fix_repo, apply_patch
 
 app = Flask(__name__)
 
@@ -65,6 +66,123 @@ def scan_stream():
                 # Scan finished – send the final result
                 data = result_holder[0] if result_holder else {"success": False, "error": "Unknown error"}
                 yield f"event: result\ndata: {json.dumps(data)}\n\n"
+                break
+            else:
+                yield f"event: progress\ndata: {json.dumps({'message': msg})}\n\n"
+
+    return Response(
+        _generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.route("/fix/stream", methods=["GET"])
+def fix_stream():
+    """SSE endpoint: clone → scan → fix → build → re-scan loop with live progress."""
+    repo_url = (request.args.get("repo_url") or "").strip()
+    if not repo_url:
+        return jsonify({"success": False, "error": "Repository URL is required."}), 400
+
+    progress_queue: queue.Queue[str | None] = queue.Queue()
+    result_holder: list[dict] = []
+
+    def _on_progress(message: str):
+        progress_queue.put(message)
+
+    def _run_fix():
+        try:
+            result = fix_repo(repo_url, progress_callback=_on_progress)
+            result_holder.append(result)
+        except Exception as exc:
+            result_holder.append({"success": False, "error": str(exc)})
+        finally:
+            progress_queue.put(None)
+
+    thread = threading.Thread(target=_run_fix, daemon=True)
+    thread.start()
+
+    def _generate():
+        while True:
+            try:
+                msg = progress_queue.get(timeout=300)
+            except queue.Empty:
+                yield ": keepalive\n\n"
+                continue
+
+            if msg is None:
+                data = result_holder[0] if result_holder else {"success": False, "error": "Unknown error"}
+                yield f"event: result\ndata: {json.dumps(data)}\n\n"
+                break
+            else:
+                yield f"event: progress\ndata: {json.dumps({'message': msg})}\n\n"
+
+    return Response(
+        _generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.route("/fix/apply", methods=["POST"])
+def fix_apply():
+    """
+    SSE endpoint: takes the scan report rows + repo URL as input,
+    applies fixes from the report, builds, re-scans iteratively.
+    Expects JSON body: { repo_url, ecosystem, rows: [[sev, label, fix], …] }
+    """
+    data = request.get_json(force=True)
+    repo_url = (data.get("repo_url") or "").strip()
+    ecosystem = (data.get("ecosystem") or "").strip()
+    scan_rows = data.get("rows", [])
+
+    if not repo_url:
+        return jsonify({"success": False, "error": "Repository URL is required."}), 400
+    if not scan_rows:
+        return jsonify({"success": False, "error": "No scan rows provided."}), 400
+    if not ecosystem:
+        return jsonify({"success": False, "error": "Ecosystem is required."}), 400
+
+    progress_queue: queue.Queue[str | None] = queue.Queue()
+    result_holder: list[dict] = []
+
+    def _on_progress(message: str):
+        progress_queue.put(message)
+
+    def _run_patch():
+        try:
+            result = apply_patch(
+                repo_url=repo_url,
+                scan_rows=scan_rows,
+                ecosystem=ecosystem,
+                progress_callback=_on_progress,
+            )
+            result_holder.append(result)
+        except Exception as exc:
+            result_holder.append({"success": False, "error": str(exc)})
+        finally:
+            progress_queue.put(None)
+
+    thread = threading.Thread(target=_run_patch, daemon=True)
+    thread.start()
+
+    def _generate():
+        while True:
+            try:
+                msg = progress_queue.get(timeout=300)
+            except queue.Empty:
+                yield ": keepalive\n\n"
+                continue
+
+            if msg is None:
+                result = result_holder[0] if result_holder else {"success": False, "error": "Unknown error"}
+                yield f"event: result\ndata: {json.dumps(result)}\n\n"
                 break
             else:
                 yield f"event: progress\ndata: {json.dumps({'message': msg})}\n\n"
