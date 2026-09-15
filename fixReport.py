@@ -50,6 +50,145 @@ from scanner import (
 MAX_FIX_ITERATIONS = 5          # safety limit
 FIXABLE_SEVERITIES = {"CRITICAL", "HIGH", "MODERATE", "LOW"}
 
+# Holds the repo path temporarily so it can be used for PR creation
+# keyed by a patch_id returned to the frontend
+_ACTIVE_PATCHES: dict[str, Path] = {}
+
+
+# ---------------------------------------------------------------------------
+# Git diff / PR helpers
+# ---------------------------------------------------------------------------
+
+def _get_changed_files(repo_path: Path) -> list[dict]:
+    """
+    Run `git diff` on the cloned repo to get all changed files with their diffs.
+    Returns a list of { filename, status, diff } dicts.
+    """
+    result = _run_cmd(
+        ["git", "diff", "--name-status"],
+        cwd=str(repo_path), shell=True,
+    )
+    files: list[dict] = []
+    seen: set[str] = set()
+
+    for line in (result.stdout or "").strip().splitlines():
+        parts = line.split("\t", 1)
+        if len(parts) >= 2:
+            status_code, filename = parts[0].strip(), parts[1].strip()
+            if filename in seen:
+                continue
+            seen.add(filename)
+            status_map = {"M": "modified", "A": "added", "D": "deleted", "R": "renamed"}
+            status = status_map.get(status_code[0], "modified")
+
+            # Get the unified diff for this file
+            diff_result = _run_cmd(
+                ["git", "diff", "--", filename],
+                cwd=str(repo_path), shell=True,
+            )
+            diff_text = (diff_result.stdout or "").strip()
+
+            files.append({
+                "filename": filename,
+                "status": status,
+                "diff": diff_text,
+            })
+
+    return files
+
+
+def _create_pr_branch_and_push(
+    repo_path: Path,
+    branch_name: str,
+    commit_message: str,
+    progress: ProgressFn = None,
+) -> dict:
+    """
+    Create a fix branch, commit all changes, and push.
+    Then attempt to create a PR via GitHub CLI (`gh pr create`).
+    Returns { success, branch, pr_url, error }.
+    """
+    env = os.environ.copy()
+
+    # Create and checkout fix branch
+    if progress:
+        progress(f"Creating branch: {branch_name}…")
+    result = _run_cmd(
+        ["git", "checkout", "-b", branch_name],
+        cwd=str(repo_path), shell=True, env=env,
+    )
+    if result.returncode != 0:
+        return {"success": False, "error": f"Failed to create branch: {result.stderr}"}
+
+    # Stage all changes
+    if progress:
+        progress("Staging changes…")
+    _run_cmd(["git", "add", "-A"], cwd=str(repo_path), shell=True, env=env)
+
+    # Commit
+    if progress:
+        progress("Committing changes…")
+    result = _run_cmd(
+        ["git", "commit", "-m", commit_message],
+        cwd=str(repo_path), shell=True, env=env,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr or ""
+        if "nothing to commit" in stderr.lower() or "nothing to commit" in (result.stdout or "").lower():
+            return {"success": False, "error": "No changes to commit."}
+        return {"success": False, "error": f"Commit failed: {stderr}"}
+
+    # Push
+    if progress:
+        progress(f"Pushing branch {branch_name} to origin…")
+    result = _run_cmd(
+        ["git", "push", "-u", "origin", branch_name],
+        cwd=str(repo_path), shell=True, env=env,
+    )
+    if result.returncode != 0:
+        return {
+            "success": False,
+            "branch": branch_name,
+            "error": f"Push failed (you may need write access): {(result.stderr or '')[:500]}",
+        }
+
+    # Try creating a PR using GitHub CLI
+    pr_url = ""
+    if progress:
+        progress("Creating pull request…")
+    pr_result = _run_cmd(
+        ["gh", "pr", "create",
+         "--title", commit_message,
+         "--body", "Automated vulnerability fix — dependency versions upgraded to patched releases.",
+         "--head", branch_name],
+        cwd=str(repo_path), shell=True, env=env,
+    )
+    if pr_result.returncode == 0:
+        pr_url = (pr_result.stdout or "").strip()
+    else:
+        # gh CLI may not be installed or user may not have permissions
+        # Return success for the push at least
+        return {
+            "success": True,
+            "branch": branch_name,
+            "pr_url": "",
+            "error": f"Branch pushed but PR creation failed (install `gh` CLI for auto-PR): {(pr_result.stderr or '')[:300]}",
+        }
+
+    return {
+        "success": True,
+        "branch": branch_name,
+        "pr_url": pr_url,
+        "error": "",
+    }
+
+
+def cleanup_patch(patch_id: str) -> None:
+    """Clean up a held patch repo by its ID."""
+    repo_path = _ACTIVE_PATCHES.pop(patch_id, None)
+    if repo_path:
+        cleanup_repo(repo_path)
+
 ProgressFn = Callable[[str], None] | None
 
 
@@ -996,6 +1135,15 @@ def apply_patch(
         _progress("Building final report…")
         pdf_path = build_pdf(final_rows, f"{project_name}_patched", ecosystem)
 
+        # ── Capture changed files + diffs ──────────────────────────
+        _progress("Collecting changed files…")
+        changed_files = _get_changed_files(repo_path)
+
+        # Generate a patch_id and hold the repo for PR creation
+        import uuid as _uuid
+        patch_id = _uuid.uuid4().hex[:12]
+        _ACTIVE_PATCHES[patch_id] = repo_path
+
         result = {
             "success": True,
             "project_name": project_name,
@@ -1024,13 +1172,194 @@ def apply_patch(
             "pdf_filename": pdf_path.name,
             "pdf_path": str(pdf_path),
             "build_success": iterations[-1]["build_success"] if iterations else True,
+            "changed_files": changed_files,
+            "patch_id": patch_id,
         }
 
         _progress("✅ Patch applied successfully!")
         return result
 
     except Exception as exc:
-        return {"success": False, "error": str(exc)}
-    finally:
+        # Clean up on error
         if repo_path:
             cleanup_repo(repo_path)
+        return {"success": False, "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# Apply Patch Local — works on a user-specified local repo, no clone/cleanup
+# ---------------------------------------------------------------------------
+
+def apply_patch_local(
+    local_path: str,
+    scan_rows: list[list[str]],
+    ecosystem: str,
+    progress_callback: ProgressFn = None,
+    max_iterations: int = MAX_FIX_ITERATIONS,
+) -> dict:
+    """
+    Apply fixes on a locally cloned repo. The repo is NOT cleaned up after
+    the fix — it stays on disk so the user can review and create a PR.
+
+    Parameters:
+        local_path:        Absolute path to the local repo.
+        scan_rows:         Rows from a previous scan: [[severity, label, fix], …].
+        ecosystem:         Detected ecosystem ('npm', 'python', 'maven', 'dotnet').
+        progress_callback: Optional SSE progress function.
+        max_iterations:    Max fix-build-scan cycles (default 5).
+    """
+    def _progress(msg: str):
+        if progress_callback:
+            progress_callback(msg)
+
+    repo_path = Path(local_path)
+    if not repo_path.exists():
+        return {"success": False, "error": f"Path does not exist: {local_path}"}
+
+    project_name = repo_path.name or "project"
+    eco_label = ECOSYSTEM_LABELS.get(ecosystem, ecosystem)
+    _progress(f"Working on local repo: {repo_path}")
+    _progress(f"Ecosystem: {eco_label}")
+
+    scanner_fn = _SCANNERS.get(ecosystem)
+    fix_applier = _FIX_APPLIERS.get(ecosystem)
+    builder = _BUILDERS.get(ecosystem)
+
+    if not fix_applier:
+        return {"success": False, "error": f"No fix applier for ecosystem: {ecosystem}"}
+
+    initial_rows = deepcopy(scan_rows)
+    initial_rows.sort(key=lambda r: (SEVERITY_ORDER.get(r[0], 99), r[1]))
+    initial_summary = Counter(r[0] for r in initial_rows)
+
+    total_fixable = sum(
+        1 for r in initial_rows
+        if r[0] in FIXABLE_SEVERITIES and _parse_fix_version(r[2])
+    )
+    _progress(f"Report has {len(initial_rows)} vulnerabilities ({total_fixable} fixable)")
+
+    if total_fixable == 0:
+        _progress("No fixable vulnerabilities — nothing to patch.")
+        return {
+            "success": True, "project_name": project_name,
+            "ecosystem": ecosystem, "ecosystem_label": eco_label,
+            "iterations": [], "total_iterations": 0,
+            "fixes_applied": [], "total_fixes": 0,
+            "before": {"total": len(initial_rows), "critical": initial_summary.get("CRITICAL", 0),
+                       "high": initial_summary.get("HIGH", 0), "moderate": initial_summary.get("MODERATE", 0),
+                       "low": initial_summary.get("LOW", 0), "rows": initial_rows},
+            "after": {"total": len(initial_rows), "critical": initial_summary.get("CRITICAL", 0),
+                      "high": initial_summary.get("HIGH", 0), "moderate": initial_summary.get("MODERATE", 0),
+                      "low": initial_summary.get("LOW", 0), "rows": initial_rows},
+            "pdf_filename": "", "pdf_path": "", "build_success": True,
+            "changed_files": [], "patch_id": "", "local_path": str(repo_path),
+        }
+
+    try:
+        iterations: list[dict] = []
+        all_fixes_applied: list[dict] = []
+        current_rows = initial_rows
+
+        for iteration in range(1, max_iterations + 1):
+            _progress(f"━━━ Iteration {iteration}/{max_iterations} ━━━")
+
+            summary = Counter(r[0] for r in current_rows)
+            fixable_count = sum(
+                1 for r in current_rows
+                if r[0] in FIXABLE_SEVERITIES and _parse_fix_version(r[2])
+            )
+            _progress(f"[Iteration {iteration}] {len(current_rows)} vulnerabilities ({fixable_count} fixable)")
+
+            if fixable_count == 0:
+                _progress(f"[Iteration {iteration}] No more fixable vulnerabilities — done!")
+                iterations.append({"iteration": iteration, "fixes_applied": [],
+                                   "build_success": True, "build_output": "",
+                                   "remaining_vulns": len(current_rows),
+                                   "remaining_fixable": 0, "summary": dict(summary)})
+                break
+
+            fix_actions = extract_fix_actions(current_rows)
+            _progress(f"[Iteration {iteration}] Applying {len(fix_actions)} version upgrades…")
+            applied = fix_applier(repo_path, fix_actions, progress=_progress)
+
+            applied_dicts = [
+                {"package": fa.package, "from": fa.current_version,
+                 "to": fa.target_version, "vuln_id": fa.vuln_id, "severity": fa.severity}
+                for fa in applied
+            ]
+            all_fixes_applied.extend(applied_dicts)
+
+            if not applied:
+                _progress(f"[Iteration {iteration}] Could not apply any fixes")
+                iterations.append({"iteration": iteration, "fixes_applied": applied_dicts,
+                                   "build_success": False, "build_output": "No fixes could be applied.",
+                                   "remaining_vulns": len(current_rows),
+                                   "remaining_fixable": fixable_count, "summary": dict(summary)})
+                break
+
+            _progress(f"[Iteration {iteration}] Applied {len(applied)} fixes")
+
+            build_ok, build_output = True, ""
+            if builder:
+                _progress(f"[Iteration {iteration}] Running build verification…")
+                build_ok, build_output = builder(repo_path, progress=_progress)
+                _progress(f"[Iteration {iteration}] {'✅ Build succeeded!' if build_ok else '⚠️ Build failed'}")
+
+            iterations.append({"iteration": iteration, "fixes_applied": applied_dicts,
+                               "build_success": build_ok,
+                               "build_output": build_output[-2000:] if build_output else "",
+                               "remaining_vulns": 0, "remaining_fixable": 0, "summary": {}})
+
+            if scanner_fn:
+                _progress(f"[Iteration {iteration}] Re-scanning…")
+                current_rows = scanner_fn(repo_path, progress=_progress)
+                current_rows.sort(key=lambda r: (SEVERITY_ORDER.get(r[0], 99), r[1]))
+
+        final_rows = current_rows
+        final_summary = Counter(r[0] for r in final_rows)
+        final_fixable = sum(1 for r in final_rows if r[0] in FIXABLE_SEVERITIES and _parse_fix_version(r[2]))
+
+        if iterations:
+            iterations[-1]["remaining_vulns"] = len(final_rows)
+            iterations[-1]["remaining_fixable"] = final_fixable
+            iterations[-1]["summary"] = dict(final_summary)
+
+        _progress("Building final report…")
+        pdf_path = build_pdf(final_rows, f"{project_name}_patched", ecosystem)
+
+        _progress("Collecting changed files…")
+        changed_files = _get_changed_files(repo_path)
+
+        # Register patch for PR creation — local repo, NOT cleaned up
+        import uuid as _uuid
+        patch_id = _uuid.uuid4().hex[:12]
+        _ACTIVE_PATCHES[patch_id] = repo_path
+
+        result = {
+            "success": True,
+            "project_name": project_name,
+            "ecosystem": ecosystem,
+            "ecosystem_label": eco_label,
+            "iterations": iterations,
+            "total_iterations": len(iterations),
+            "fixes_applied": all_fixes_applied,
+            "total_fixes": len(all_fixes_applied),
+            "before": {"total": len(initial_rows), "critical": initial_summary.get("CRITICAL", 0),
+                       "high": initial_summary.get("HIGH", 0), "moderate": initial_summary.get("MODERATE", 0),
+                       "low": initial_summary.get("LOW", 0), "rows": initial_rows},
+            "after": {"total": len(final_rows), "critical": final_summary.get("CRITICAL", 0),
+                      "high": final_summary.get("HIGH", 0), "moderate": final_summary.get("MODERATE", 0),
+                      "low": final_summary.get("LOW", 0), "rows": final_rows},
+            "pdf_filename": pdf_path.name,
+            "pdf_path": str(pdf_path),
+            "build_success": iterations[-1]["build_success"] if iterations else True,
+            "changed_files": changed_files,
+            "patch_id": patch_id,
+            "local_path": str(repo_path),
+        }
+
+        _progress("✅ Patch applied to local repo!")
+        return result
+
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}

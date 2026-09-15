@@ -88,6 +88,79 @@ def cleanup_repo(repo_path: Path) -> None:
         shutil.rmtree(repo_path, ignore_errors=True)
 
 
+def clone_repo_to(repo_url: str, dest: str) -> Path:
+    """Clone a git repo (full depth) into a user-specified directory.
+    Returns the Path of the cloned repo root."""
+    dest_path = Path(dest)
+    if dest_path.exists() and any(dest_path.iterdir()):
+        # If directory exists and is non-empty, check if it's already the repo
+        if (dest_path / ".git").exists():
+            return dest_path
+        # Clone into a subdirectory named after the repo
+        repo_name = repo_url.rstrip("/").split("/")[-1].replace(".git", "")
+        dest_path = dest_path / repo_name
+
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "clone", repo_url, str(dest_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return dest_path
+
+
+def scan_local_repo(local_path: str, progress_callback=None) -> dict:
+    """
+    Scan a repo that already exists on disk (no clone, no cleanup).
+    Returns the same dict shape as scan_repo().
+    """
+    def _progress(msg):
+        if progress_callback:
+            progress_callback(msg)
+
+    try:
+        repo_path = Path(local_path)
+        if not repo_path.exists():
+            return {"success": False, "error": f"Path does not exist: {local_path}"}
+
+        project_name = repo_path.name or "project"
+
+        _progress("Detecting project type…")
+        ecosystem = detect_ecosystem(repo_path)
+        eco_label = ECOSYSTEM_LABELS.get(ecosystem, ecosystem)
+
+        _progress(f"Detected: {eco_label}. Running vulnerability scan…")
+        scanner_fn = _SCANNERS[ecosystem]
+        rows = scanner_fn(repo_path, progress=_progress)
+
+        rows.sort(key=lambda r: (SEVERITY_ORDER.get(r[0], 99), r[1]))
+
+        _progress("Building report…")
+        pdf_path = build_pdf(rows, project_name, ecosystem)
+
+        summary = Counter(r[0] for r in rows)
+        return {
+            "success": True,
+            "pdf_path": str(pdf_path),
+            "pdf_filename": pdf_path.name,
+            "project_name": project_name,
+            "ecosystem": ecosystem,
+            "ecosystem_label": eco_label,
+            "local_path": str(repo_path),
+            "total": len(rows),
+            "critical": summary.get("CRITICAL", 0),
+            "high": summary.get("HIGH", 0),
+            "moderate": summary.get("MODERATE", 0),
+            "low": summary.get("LOW", 0),
+            "info": summary.get("INFO", 0),
+            "unknown": summary.get("UNKNOWN", 0),
+            "rows": rows,
+        }
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
 # ---------------------------------------------------------------------------
 # Ecosystem detection
 # ---------------------------------------------------------------------------

@@ -53,8 +53,10 @@
       outline: none;
       transition: border-color .2s;
     }
-    .form-group input::placeholder { color: #777; }
+    .form-group input::placeholder { color: #666; font-size: .9rem; }
     .form-group input:focus { border-color: #7b2ff7; }
+    .form-group:first-child input { border-radius: 12px; }
+    .form-group + .form-group { margin-top: -.4rem; }
 
     .btn {
       padding: .85rem 1.8rem;
@@ -296,6 +298,89 @@
     .build-pass { background: rgba(46,204,113,.2); color: #2ecc71; }
     .build-fail { background: rgba(231,76,60,.2); color: #e74c3c; }
 
+    /* ── Changed Files & Diff Viewer ──────────────────────── */
+    .changed-files-section { margin-top: 1.5rem; }
+    .changed-files-section h3 { font-size: .95rem; color: #ccc; margin-bottom: .6rem; }
+
+    .file-list { display: flex; flex-direction: column; gap: .4rem; margin-bottom: 1rem; }
+    .file-entry {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.07);
+      border-radius: 10px;
+      overflow: hidden;
+      transition: border-color .2s;
+    }
+    .file-entry:hover { border-color: rgba(123,47,247,.4); }
+    .file-header {
+      display: flex; align-items: center; gap: .6rem;
+      padding: .6rem .9rem;
+      cursor: pointer; user-select: none;
+    }
+    .file-header:hover { background: rgba(255,255,255,0.03); }
+    .file-status {
+      display: inline-block; padding: .1rem .45rem;
+      border-radius: 4px; font-size: .68rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .03em;
+    }
+    .file-status.modified { background: rgba(230,126,34,.2); color: #e67e22; }
+    .file-status.added    { background: rgba(46,204,113,.2); color: #2ecc71; }
+    .file-status.deleted  { background: rgba(231,76,60,.2); color: #e74c3c; }
+    .file-status.renamed  { background: rgba(52,152,219,.2); color: #3498db; }
+    .file-name { font-family: 'Fira Code','Cascadia Code','Consolas',monospace; font-size: .85rem; color: #ddd; }
+    .file-toggle { margin-left: auto; color: #777; font-size: .8rem; transition: transform .2s; }
+    .file-toggle.open { transform: rotate(90deg); }
+
+    .diff-viewer {
+      display: none; overflow-x: auto;
+      background: rgba(0,0,0,.35);
+      border-top: 1px solid rgba(255,255,255,0.05);
+      padding: .6rem .8rem;
+      font-family: 'Fira Code','Cascadia Code','Consolas',monospace;
+      font-size: .78rem; line-height: 1.65;
+      white-space: pre; color: #bbb;
+      max-height: 400px; overflow-y: auto;
+    }
+    .diff-viewer.visible { display: block; }
+    .diff-viewer::-webkit-scrollbar { width: 5px; height: 5px; }
+    .diff-viewer::-webkit-scrollbar-thumb { background: rgba(255,255,255,.12); border-radius: 3px; }
+
+    .diff-line-add { color: #2ecc71; background: rgba(46,204,113,.08); display: block; }
+    .diff-line-del { color: #e74c3c; background: rgba(231,76,60,.08); display: block; }
+    .diff-line-hunk { color: #7b2ff7; font-weight: 600; display: block; }
+    .diff-line-ctx { color: #888; display: block; }
+
+    /* ── Create PR Section ────────────────────────────────── */
+    .pr-section { margin-top: 1.25rem; }
+    .pr-form { display: flex; flex-direction: column; gap: .6rem; }
+    .pr-form input, .pr-form textarea {
+      padding: .6rem .8rem; border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.05); color: #fff;
+      font-size: .9rem; font-family: inherit; outline: none;
+    }
+    .pr-form input:focus, .pr-form textarea:focus { border-color: #7b2ff7; }
+    .pr-form textarea { resize: vertical; min-height: 50px; }
+
+    .btn-pr {
+      display: inline-flex; align-items: center; justify-content: center; gap: .5rem;
+      padding: .75rem 2rem; border-radius: 12px; border: none;
+      background: linear-gradient(135deg, #6e5494, #24292e);
+      color: #fff; font-weight: 600; font-size: 1rem;
+      cursor: pointer; transition: opacity .2s, transform .1s;
+      align-self: center;
+    }
+    .btn-pr:hover { opacity: .9; transform: translateY(-1px); }
+    .btn-pr:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+    .btn-pr svg { width: 20px; height: 20px; }
+
+    .pr-result {
+      margin-top: .8rem; padding: .7rem 1rem;
+      border-radius: 10px; font-size: .88rem; text-align: center;
+    }
+    .pr-result.pr-success { background: rgba(46,204,113,.12); border: 1px solid rgba(46,204,113,.3); color: #2ecc71; }
+    .pr-result.pr-error   { background: rgba(231,76,60,.12); border: 1px solid rgba(231,76,60,.3); color: #e74c3c; }
+    .pr-result a { color: #00d2ff; text-decoration: underline; }
+
     /* ── Ecosystem Badge ───────────────────────────────────── */
     .ecosystem-info {
       text-align: center; margin-bottom: 1.2rem;
@@ -320,7 +405,7 @@
 
   <div class="header">
     <h1>🛡️ Vulnerability Scanner Agent</h1>
-    <p>Paste a Git repository URL to scan for vulnerabilities</p>
+    <p>Clone a Git repository locally, scan for vulnerabilities, and auto-fix them</p>
     <p style="margin-top:.4rem;font-size:.85rem;color:#777;">
       Supports <strong style="color:#aaa;">Node.js</strong> (Angular, React, TypeScript) ·
       <strong style="color:#aaa;">Python</strong> ·
@@ -330,13 +415,19 @@
   </div>
 
   <div class="card">
-    <form id="scanForm" onsubmit="return handleScan(event)">
+    <form id="scanForm" onsubmit="return handleCloneAndScan(event)">
       <div class="form-group">
         <input
           type="text" id="repoUrl"
           placeholder="https://github.com/owner/repo.git"
           autocomplete="url" required />
-        <button class="btn" type="submit" id="scanBtn">Scan</button>
+      </div>
+      <div class="form-group">
+        <input
+          type="text" id="clonePath"
+          placeholder="Local path to clone into (e.g. C:\repos\my-project)"
+          required />
+        <button class="btn" type="submit" id="scanBtn">Clone &amp; Scan</button>
       </div>
     </form>
 
@@ -390,6 +481,7 @@
 <script>
   let scanStartTime = null;
   let lastScanData = null;  // Stores the last scan result for Apply Patch
+  let localRepoPath = null; // Path to the locally cloned repo
 
   function elapsedStr() {
     if (!scanStartTime) return "";
@@ -442,10 +534,11 @@
     }
   }
 
-  async function handleScan(e) {
+  async function handleCloneAndScan(e) {
     e.preventDefault();
     const url = document.getElementById("repoUrl").value.trim();
-    if (!url) return;
+    const clonePath = document.getElementById("clonePath").value.trim();
+    if (!url || !clonePath) return;
 
     // Reset UI
     const btn = document.getElementById("scanBtn");
@@ -456,17 +549,46 @@
     const progressLog = document.getElementById("progressLog");
 
     btn.disabled = true;
-    btn.textContent = "Scanning…";
+    btn.textContent = "Cloning…";
     results.classList.remove("visible");
     errorMsg.classList.remove("visible");
+    document.getElementById("fixResults").classList.remove("visible");
     progressLog.innerHTML = "";
     status.classList.add("visible");
     scanStartTime = Date.now();
-    statusText.textContent = "Connecting…";
+    statusText.textContent = "Cloning repository…";
+    addProgressStep("Cloning repository to " + clonePath + "…");
 
-    // Open SSE stream
-    const params = new URLSearchParams({ repo_url: url });
-    const evtSource = new EventSource(`/scan/stream?${params}`);
+    // Step 1: Clone to local path
+    try {
+      const cloneResp = await fetch("/clone", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repo_url: url, clone_path: clonePath }),
+      });
+      const cloneData = await cloneResp.json();
+
+      if (!cloneData.success) {
+        throw new Error(cloneData.error || "Clone failed.");
+      }
+
+      localRepoPath = cloneData.local_path;
+      addProgressStep("✓ Cloned to: " + localRepoPath, true);
+    } catch (err) {
+      status.classList.remove("visible");
+      errorMsg.textContent = "⚠️ Clone failed: " + (err.message || err);
+      errorMsg.classList.add("visible");
+      btn.disabled = false;
+      btn.textContent = "Clone & Scan";
+      return;
+    }
+
+    // Step 2: Scan the local clone via SSE
+    btn.textContent = "Scanning…";
+    statusText.textContent = "Scanning local repository…";
+
+    const params = new URLSearchParams({ local_path: localRepoPath });
+    const evtSource = new EventSource(`/scan/local/stream?${params}`);
 
     evtSource.addEventListener("progress", (e) => {
       const data = JSON.parse(e.data);
@@ -479,11 +601,10 @@
 
       const data = JSON.parse(e.data);
 
-      // Small delay so user sees the final ✓ before switching view
       setTimeout(() => {
         status.classList.remove("visible");
         btn.disabled = false;
-        btn.textContent = "Scan";
+        btn.textContent = "Clone & Scan";
 
         if (!data.success) {
           errorMsg.textContent = "⚠️ " + data.error;
@@ -491,6 +612,8 @@
           return;
         }
 
+        // Attach local_path to scan data
+        data.local_path = localRepoPath;
         renderResults(data);
       }, 400);
     });
@@ -501,7 +624,7 @@
       errorMsg.textContent = "⚠️ Connection lost. Please try again.";
       errorMsg.classList.add("visible");
       btn.disabled = false;
-      btn.textContent = "Scan";
+      btn.textContent = "Clone & Scan";
     };
   }
 
@@ -572,8 +695,12 @@
       return;
     }
 
-    const url = document.getElementById("repoUrl").value.trim();
-    if (!url) return;
+    const repoLocalPath = lastScanData.local_path || localRepoPath;
+    if (!repoLocalPath) {
+      document.getElementById("errorMsg").textContent = "⚠️ No local repo path. Clone the repo first.";
+      document.getElementById("errorMsg").classList.add("visible");
+      return;
+    }
 
     const patchBtn = document.getElementById("applyPatchBtn");
     const status = document.getElementById("status");
@@ -589,16 +716,16 @@
     progressLog.innerHTML = "";
     status.classList.add("visible");
     scanStartTime = Date.now();
-    statusText.textContent = "Sending report to patch engine…";
+    statusText.textContent = "Applying patches to local repo…";
 
-    // POST the scan report to the apply endpoint, then read SSE from the response
+    // POST the scan report to the local apply endpoint
     const payload = {
-      repo_url: url,
+      local_path: repoLocalPath,
       ecosystem: lastScanData.ecosystem,
       rows: lastScanData.rows,
     };
 
-    fetch("/fix/apply", {
+    fetch("/fix/apply-local", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -696,12 +823,18 @@
       🩹 Apply Patch`;
   }
 
+  let currentPatchId = null;
+
   function renderFixResults(data) {
     const container = document.getElementById("fixResults");
     const before = data.before || {};
     const after = data.after || {};
     const fixes = data.fixes_applied || [];
     const iterations = data.iterations || [];
+    const changedFiles = data.changed_files || [];
+
+    // Store patch ID for PR creation
+    currentPatchId = data.patch_id || null;
 
     let html = `
       <div class="fix-header">
@@ -759,6 +892,26 @@
         No version upgrades could be applied (fix versions may not match manifest entries).</p>`;
     }
 
+    // ── Changed Files with Diff Viewer ────────────────────────
+    if (changedFiles.length > 0) {
+      html += `<div class="changed-files-section">
+        <h3>📂 ${changedFiles.length} File${changedFiles.length > 1 ? "s" : ""} Changed — click to view diff</h3>
+        <div class="file-list">`;
+      changedFiles.forEach((file, idx) => {
+        const diffHtml = formatDiff(file.diff || "");
+        html += `
+          <div class="file-entry">
+            <div class="file-header" onclick="toggleDiff(${idx})">
+              <span class="file-status ${file.status}">${file.status}</span>
+              <span class="file-name">${file.filename}</span>
+              <span class="file-toggle" id="toggle-${idx}">▶</span>
+            </div>
+            <div class="diff-viewer" id="diff-${idx}">${diffHtml}</div>
+          </div>`;
+      });
+      html += `</div></div>`;
+    }
+
     // Iteration log
     if (iterations.length > 0) {
       html += `<h3 style="font-size:.95rem;margin-bottom:.5rem;color:#ccc;">📋 Iteration Log</h3>`;
@@ -807,8 +960,108 @@
       </div>`;
     }
 
+    // ── Create Pull Request Section ───────────────────────────
+    if (currentPatchId && changedFiles.length > 0) {
+      html += `
+        <div class="pr-section">
+          <h3 style="font-size:.95rem;margin-bottom:.6rem;color:#ccc;">
+            🚀 Create Pull Request</h3>
+          <div class="pr-form">
+            <input type="text" id="prBranch"
+              placeholder="Branch name (e.g. fix/vuln-patch)"
+              value="fix/vuln-patch-${currentPatchId.substring(0, 8)}" />
+            <input type="text" id="prCommitMsg"
+              placeholder="Commit message"
+              value="fix: upgrade vulnerable dependencies to patched versions" />
+            <button class="btn-pr" id="createPrBtn" onclick="handleCreatePR()">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor">
+                <path d="M5 3.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm0 2.122a2.25 2.25 0 1 0-1.5 0v.878A2.25 2.25 0 0 0 5.75 8.5h1.5v2.128a2.251 2.251 0 1 0 1.5 0V8.5h1.5a2.25 2.25 0 0 0 2.25-2.25v-.878a2.25 2.25 0 1 0-1.5 0v.878a.75.75 0 0 1-.75.75h-4.5a.75.75 0 0 1-.75-.75v-.878ZM12.5 3.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm-5.75 9.5a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Z"/>
+              </svg>
+              Create Pull Request
+            </button>
+          </div>
+          <div id="prResult"></div>
+        </div>`;
+    }
+
     container.innerHTML = html;
     container.classList.add("visible");
+  }
+
+  // ── Diff formatting ─────────────────────────────────────────
+  function formatDiff(diffText) {
+    if (!diffText) return '<span class="diff-line-ctx">(no diff available)</span>';
+    return diffText.split("\n").map(line => {
+      const escaped = line
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+      if (line.startsWith("@@"))      return `<span class="diff-line-hunk">${escaped}</span>`;
+      if (line.startsWith("+"))       return `<span class="diff-line-add">${escaped}</span>`;
+      if (line.startsWith("-"))       return `<span class="diff-line-del">${escaped}</span>`;
+      return `<span class="diff-line-ctx">${escaped}</span>`;
+    }).join("");
+  }
+
+  function toggleDiff(idx) {
+    const viewer = document.getElementById("diff-" + idx);
+    const toggle = document.getElementById("toggle-" + idx);
+    const isOpen = viewer.classList.contains("visible");
+    viewer.classList.toggle("visible");
+    toggle.classList.toggle("open");
+    toggle.textContent = isOpen ? "▶" : "▼";
+  }
+
+  // ── Create Pull Request ─────────────────────────────────────
+  async function handleCreatePR() {
+    if (!currentPatchId) return;
+
+    const prBtn = document.getElementById("createPrBtn");
+    const prResult = document.getElementById("prResult");
+    const branch = document.getElementById("prBranch").value.trim();
+    const commitMsg = document.getElementById("prCommitMsg").value.trim();
+
+    prBtn.disabled = true;
+    prBtn.textContent = "Creating PR…";
+    prResult.innerHTML = "";
+    prResult.className = "pr-result";
+
+    try {
+      const resp = await fetch("/fix/create-pr", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          patch_id: currentPatchId,
+          branch_name: branch,
+          commit_message: commitMsg,
+        }),
+      });
+      const data = await resp.json();
+
+      if (data.success && data.pr_url) {
+        prResult.className = "pr-result pr-success";
+        prResult.innerHTML = `✅ Pull request created!
+          <a href="${data.pr_url}" target="_blank">${data.pr_url}</a>`;
+      } else if (data.success && data.branch) {
+        prResult.className = "pr-result pr-success";
+        prResult.innerHTML = `✅ Branch <strong>${data.branch}</strong> pushed!
+          ${data.error ? `<br><span style="font-size:.82rem;color:#aaa;">${data.error}</span>` : ""}`;
+      } else {
+        prResult.className = "pr-result pr-error";
+        prResult.innerHTML = `⚠️ ${data.error || "Unknown error"}`;
+      }
+      currentPatchId = null; // Consumed
+    } catch (err) {
+      prResult.className = "pr-result pr-error";
+      prResult.innerHTML = `⚠️ ${err.message || "Failed to create PR."}`;
+    } finally {
+      prBtn.disabled = false;
+      prBtn.innerHTML = `
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M5 3.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm0 2.122a2.25 2.25 0 1 0-1.5 0v.878A2.25 2.25 0 0 0 5.75 8.5h1.5v2.128a2.251 2.251 0 1 0 1.5 0V8.5h1.5a2.25 2.25 0 0 0 2.25-2.25v-.878a2.25 2.25 0 1 0-1.5 0v.878a.75.75 0 0 1-.75.75h-4.5a.75.75 0 0 1-.75-.75v-.878ZM12.5 3.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm-5.75 9.5a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Z"/>
+        </svg>
+        Create Pull Request`;
+    }
   }
 </script>
 </body>
