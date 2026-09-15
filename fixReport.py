@@ -245,7 +245,7 @@ def _parse_vuln_id(label: str) -> str:
     return m.group(1) if m else ""
 
 
-def _parse_fix_version(fix_field: str) -> str:
+def _parse_fix_version(fix_field: str, current_version: str = "") -> str:
     """
     Extract the best (highest) fix version from the fix/advisory column.
     Handles:
@@ -263,11 +263,18 @@ def _parse_fix_version(fix_field: str) -> str:
     # If it looks like "package@version"
     if "@" in fix_field:
         return fix_field.split("@")[-1].strip()
-    # Comma-separated list → pick last (usually highest)
+    # Comma-separated list → prefer the highest fix on the current major line.
     parts = [p.strip() for p in fix_field.split(",") if p.strip()]
     versions = [p for p in parts if re.match(r"^\d+[\d.]*", p)]
     if versions:
-        # Sort semantically and return the highest
+        current_numbers = [int(n) for n in re.findall(r"\d+", current_version)]
+        if current_numbers:
+            same_major = [
+                version for version in versions
+                if int(re.search(r"\d+", version).group()) == current_numbers[0]
+            ]
+            if same_major:
+                versions = same_major
         versions.sort(key=lambda v: list(map(int, re.findall(r"\d+", v))), reverse=True)
         return versions[0]
     return fix_field.strip() if fix_field.strip() != "n/a" else ""
@@ -284,7 +291,7 @@ def extract_fix_actions(rows: list[list[str]]) -> list[FixAction]:
         if severity not in FIXABLE_SEVERITIES:
             continue
         pkg, current_ver = _parse_package_and_version(label)
-        target_ver = _parse_fix_version(fix_field)
+        target_ver = _parse_fix_version(fix_field, current_ver)
         if not pkg or not target_ver:
             continue
         vuln_id = _parse_vuln_id(label)
@@ -527,6 +534,7 @@ def _apply_pom_fixes(repo_path: Path, fixes: list[FixAction], progress: Progress
 def _apply_gradle_fixes(repo_path: Path, fixes: list[FixAction], progress: ProgressFn = None) -> list[FixAction]:
     """Update dependency versions in build.gradle or build.gradle.kts."""
     applied: list[FixAction] = []
+    applied_packages: set[str] = set()
 
     for gradle_file_name in ["build.gradle", "build.gradle.kts"]:
         gradle_path = repo_path / gradle_file_name
@@ -534,6 +542,15 @@ def _apply_gradle_fixes(repo_path: Path, fixes: list[FixAction], progress: Progr
             continue
 
         content = gradle_path.read_text(encoding="utf-8")
+        boot_targets = [
+            fix.target_version for fix in fixes
+            if fix.package.startswith("org.springframework.boot:")
+        ]
+        boot_plugin_target = max(
+            boot_targets,
+            key=lambda version: [int(n) for n in re.findall(r"\d+", version)],
+            default="",
+        )
 
         for fix in fixes:
             parts = fix.package.split(":")
@@ -544,6 +561,27 @@ def _apply_gradle_fixes(repo_path: Path, fixes: list[FixAction], progress: Progr
             if group:
                 esc_g = re.escape(group)
                 esc_a = re.escape(artifact)
+
+                # Spring Boot's plugin imports an enforced BOM, so changing
+                # individual transitive constraints cannot override it.
+                if fix.package == "org.springframework.boot:spring-boot":
+                    plugin_target = boot_plugin_target or fix.target_version
+                    plugin_pattern = re.compile(
+                        r"(id\s+['\"]org\.springframework\.boot['\"]\s+version\s+['\"])[^'\"]+(['\"])",
+                    )
+                    new_content, count = plugin_pattern.subn(
+                        rf"\g<1>{plugin_target}\g<2>", content, count=1
+                    )
+                    if count > 0:
+                        content = new_content
+                        fix.target_version = plugin_target
+                        applied.append(fix)
+                        applied_packages.add(fix.package)
+                        if progress:
+                            progress(
+                                f"  gradle plugin: Spring Boot → {fix.target_version}"
+                            )
+                        continue
 
                 # Update an explicitly versioned coordinate even when the
                 # resolved version differs from the manifest or uses a variable.
@@ -571,6 +609,63 @@ def _apply_gradle_fixes(repo_path: Path, fixes: list[FixAction], progress: Progr
                     if progress:
                         progress(f"  gradle: {fix.package} {fix.current_version} → {fix.target_version}")
                     applied.append(fix)
+                    applied_packages.add(fix.package)
+
+        # Findings from the resolved dependency tree are often transitive
+        # and have no declaration to edit. Pin those coordinates with
+        # constraints so Gradle's resolution selects the patched release.
+        unmatched = [fix for fix in fixes if fix.package not in applied_packages]
+        if unmatched:
+            constraint_lines = [
+                "",
+                "// Vulnerability remediation constraints",
+                "dependencies {",
+                "    constraints {",
+            ]
+            for fix in unmatched:
+                declaration = (
+                        f"implementation(\"{fix.package}:{fix.target_version}\") {{ version {{ strictly(\"{fix.target_version}\") }} }}"
+                    if gradle_file_name.endswith(".kts")
+                        else f"implementation('{fix.package}:{fix.target_version}') {{ version {{ strictly '{fix.target_version}' }} }}"
+                )
+                constraint_lines.append(f"        {declaration}")
+                applied.append(fix)
+                if progress:
+                    progress(
+                        f"  gradle constraint: {fix.package} → {fix.target_version}"
+                    )
+            constraint_lines.extend(["    }", "}", ""])
+            content += "\n".join(constraint_lines)
+
+        # A platform can override normal constraints. Force each actionable
+        # coordinate so the post-fix dependency graph uses the patched release.
+        if fixes:
+            force_lines = [
+                "",
+                "// Enforce vulnerability remediation versions",
+                "dependencyManagement {",
+                "    dependencies {",
+            ]
+            for fix in fixes:
+                force_lines.append(
+                    f"        dependency '{fix.package}:{fix.target_version}'"
+                )
+            force_lines.extend([
+                "    }",
+                "}",
+                "",
+                "configurations.all {",
+                "    resolutionStrategy {",
+            ])
+            for fix in fixes:
+                coordinate = f"{fix.package}:{fix.target_version}"
+                force_lines.append(
+                    f"        force(\"{coordinate}\")"
+                    if gradle_file_name.endswith(".kts")
+                    else f"        force '{coordinate}'"
+                )
+            force_lines.extend(["    }", "}", ""])
+            content += "\n".join(force_lines)
 
         if applied:
             gradle_path.write_text(content, encoding="utf-8")
@@ -1006,7 +1101,10 @@ def apply_patch(
         )
 
         if total_fixable == 0:
-            _progress("No fixable vulnerabilities in the report — nothing to patch.")
+            _progress("No fixable vulnerabilities in the report — running verification rescan…")
+            final_rows = scanner_fn(repo_path, progress=_progress) if scanner_fn else initial_rows
+            final_rows.sort(key=lambda r: (SEVERITY_ORDER.get(r[0], 99), r[1]))
+            final_summary = Counter(r[0] for r in final_rows)
             return {
                 "success": True,
                 "project_name": project_name,
@@ -1025,13 +1123,14 @@ def apply_patch(
                     "rows": initial_rows,
                 },
                 "after": {
-                    "total": len(initial_rows),
-                    "critical": initial_summary.get("CRITICAL", 0),
-                    "high": initial_summary.get("HIGH", 0),
-                    "moderate": initial_summary.get("MODERATE", 0),
-                    "low": initial_summary.get("LOW", 0),
-                    "rows": initial_rows,
+                    "total": len(final_rows),
+                    "critical": final_summary.get("CRITICAL", 0),
+                    "high": final_summary.get("HIGH", 0),
+                    "moderate": final_summary.get("MODERATE", 0),
+                    "low": final_summary.get("LOW", 0),
+                    "rows": final_rows,
                 },
+                "rescan_completed": True,
                 "pdf_filename": "",
                 "pdf_path": "",
                 "build_success": True,
@@ -1135,7 +1234,9 @@ def apply_patch(
                 current_rows.sort(key=lambda r: (SEVERITY_ORDER.get(r[0], 99), r[1]))
 
         # ── Final state ────────────────────────────────────────────
-        final_rows = current_rows
+        _progress("Running final verification rescan…")
+        final_rows = scanner_fn(repo_path, progress=_progress) if scanner_fn else current_rows
+        final_rows.sort(key=lambda r: (SEVERITY_ORDER.get(r[0], 99), r[1]))
         final_summary = Counter(r[0] for r in final_rows)
         final_fixable = sum(
             1 for r in final_rows
@@ -1259,7 +1360,10 @@ def apply_patch_local(
     _progress(f"Report has {len(initial_rows)} vulnerabilities ({total_fixable} fixable)")
 
     if total_fixable == 0:
-        _progress("No fixable vulnerabilities — nothing to patch.")
+        _progress("No fixable vulnerabilities — running verification rescan…")
+        final_rows = scanner_fn(repo_path, progress=_progress) if scanner_fn else initial_rows
+        final_rows.sort(key=lambda r: (SEVERITY_ORDER.get(r[0], 99), r[1]))
+        final_summary = Counter(r[0] for r in final_rows)
         return {
             "success": True, "project_name": project_name,
             "ecosystem": ecosystem, "ecosystem_label": eco_label,
@@ -1268,9 +1372,10 @@ def apply_patch_local(
             "before": {"total": len(initial_rows), "critical": initial_summary.get("CRITICAL", 0),
                        "high": initial_summary.get("HIGH", 0), "moderate": initial_summary.get("MODERATE", 0),
                        "low": initial_summary.get("LOW", 0), "rows": initial_rows},
-            "after": {"total": len(initial_rows), "critical": initial_summary.get("CRITICAL", 0),
-                      "high": initial_summary.get("HIGH", 0), "moderate": initial_summary.get("MODERATE", 0),
-                      "low": initial_summary.get("LOW", 0), "rows": initial_rows},
+            "after": {"total": len(final_rows), "critical": final_summary.get("CRITICAL", 0),
+                      "high": final_summary.get("HIGH", 0), "moderate": final_summary.get("MODERATE", 0),
+                      "low": final_summary.get("LOW", 0), "rows": final_rows},
+            "rescan_completed": True,
             "pdf_filename": "", "pdf_path": "", "build_success": True,
             "changed_files": [], "patch_id": "", "local_path": str(repo_path),
         }
@@ -1335,7 +1440,9 @@ def apply_patch_local(
                 current_rows = scanner_fn(repo_path, progress=_progress)
                 current_rows.sort(key=lambda r: (SEVERITY_ORDER.get(r[0], 99), r[1]))
 
-        final_rows = current_rows
+        _progress("Running final verification rescan…")
+        final_rows = scanner_fn(repo_path, progress=_progress) if scanner_fn else current_rows
+        final_rows.sort(key=lambda r: (SEVERITY_ORDER.get(r[0], 99), r[1]))
         final_summary = Counter(r[0] for r in final_rows)
         final_fixable = sum(1 for r in final_rows if r[0] in FIXABLE_SEVERITIES and _parse_fix_version(r[2]))
 
@@ -1370,6 +1477,7 @@ def apply_patch_local(
             "after": {"total": len(final_rows), "critical": final_summary.get("CRITICAL", 0),
                       "high": final_summary.get("HIGH", 0), "moderate": final_summary.get("MODERATE", 0),
                       "low": final_summary.get("LOW", 0), "rows": final_rows},
+            "rescan_completed": True,
             "pdf_filename": pdf_path.name,
             "pdf_path": str(pdf_path),
             "build_success": iterations[-1]["build_success"] if iterations else True,

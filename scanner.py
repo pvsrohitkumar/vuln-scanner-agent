@@ -985,9 +985,16 @@ def _parse_gradle_dependency_tree(output: str) -> list[str]:
     seen: set[str] = set()
     for line in output.splitlines():
         # Lines like: "+--- org.springframework.boot:spring-boot-starter-web:3.1.0"
-        match = re.search(r"[\+\\|`]---\s+(\S+:\S+:\S+)", line)
+        match = re.search(r"[\+\\|`]---\s+(\S+):(\S+):(\S+)", line)
         if match:
-            dep = match.group(1)
+            group, artifact, version = match.groups()
+            # For conflict lines, Gradle reports the selected version after ->.
+            selected_match = re.search(r"\s->\s(\d[^\s(]*)", line)
+            if selected_match:
+                version = selected_match.group(1)
+            if not re.match(r"^\d+(?:\.\d+)*(?:[-+].*)?$", version):
+                continue
+            dep = f"{group}:{artifact}:{version}"
             # Strip trailing markers like " (*)" or " (c)"
             dep = re.sub(r"\s*\(.*\)\s*$", "", dep)
             if dep not in seen:

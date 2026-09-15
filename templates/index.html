@@ -839,6 +839,9 @@
     let html = `
       <div class="fix-header">
         <h2>🔧 Fix Results — ${data.total_iterations} iteration${data.total_iterations > 1 ? "s" : ""}</h2>
+        <div style="color:#8fd3a8;font-size:.8rem;margin-top:.25rem;">
+          ${data.rescan_completed ? "Post-fix rescan completed" : "Post-fix rescan unavailable"}
+        </div>
       </div>
 
       <!-- Before / After comparison -->
@@ -889,7 +892,7 @@
       html += `</div>`;
     } else {
       html += `<p style="text-align:center;color:#aaa;margin-bottom:1rem;">
-        No version upgrades could be applied (fix versions may not match manifest entries).</p>`;
+        No version upgrades were applied. The after-results below are from the post-fix rescan.</p>`;
     }
 
     // ── Changed Files with Diff Viewer ────────────────────────
@@ -934,7 +937,7 @@
     // After table
     if ((after.rows || []).length > 0) {
       html += `<h3 style="font-size:.95rem;margin-bottom:.5rem;color:#ccc;">
-        Remaining Vulnerabilities (${after.total})</h3>`;
+        Post-fix Scan Results (${after.total} remaining)</h3>`;
       html += `<div class="table-wrap"><table>
         <thead><tr><th>Severity</th><th>Package / Dependency</th><th>Fix / Advisory</th></tr></thead>
         <tbody>`;
@@ -946,6 +949,9 @@
           <td>${row[2]}</td></tr>`;
       });
       html += `</tbody></table></div>`;
+    } else {
+      html += `<p style="text-align:center;color:#8fd3a8;margin:1rem 0;">
+        Post-fix rescan completed with no remaining findings.</p>`;
     }
 
     // Download fixed report
