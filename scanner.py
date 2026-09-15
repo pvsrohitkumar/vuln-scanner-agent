@@ -796,7 +796,7 @@ def scan_repo(repo_url: str, progress_callback=None) -> dict:
 
         _progress(f"Detected: {eco_label}. Running vulnerability scan…")
         scanner_fn = _SCANNERS[ecosystem]
-        rows = scanner_fn(repo_path)
+        rows = scanner_fn(repo_path, progress=_progress)
 
         # Sort rows by severity
         rows.sort(key=lambda r: (SEVERITY_ORDER.get(r[0], 99), r[1]))
